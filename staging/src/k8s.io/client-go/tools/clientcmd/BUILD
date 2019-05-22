@@ -73,6 +73,7 @@ filegroup(
     srcs = [
         ":package-srcs",
         "//staging/src/k8s.io/client-go/tools/clientcmd/api:all-srcs",
+        "//staging/src/k8s.io/client-go/tools/clientcmd/certificate:all-srcs",
     ],
     tags = ["automanaged"],
 )

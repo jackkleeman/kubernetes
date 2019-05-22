@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package bootstrap
+package certificate
 
 import (
+	"crypto/x509/pkix"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -29,8 +30,14 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	certificatesclient "k8s.io/client-go/kubernetes/typed/certificates/v1beta1"
 	restclient "k8s.io/client-go/rest"
-	"k8s.io/client-go/util/keyutil"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/kubernetes/staging/src/k8s.io/client-go/util/keyutil"
 )
+
+var fakeNodeName = &pkix.Name{
+	Organization: []string{"system:nodes"},
+	CommonName:   "system:node:fake-node-name",
+}
 
 func TestLoadRESTClientConfig(t *testing.T) {
 	testData := []byte(`
@@ -72,7 +79,7 @@ users:
 	defer os.Remove(f.Name())
 	ioutil.WriteFile(f.Name(), testData, os.FileMode(0755))
 
-	config, err := loadRESTClientConfig(f.Name())
+	config, err := loadRESTClientConfig(f.Name(), &clientcmd.ConfigOverrides{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +98,7 @@ users:
 }
 
 func TestRequestNodeCertificateNoKeyData(t *testing.T) {
-	certData, err := requestNodeCertificate(&fakeClient{}, []byte{}, "fake-node-name")
+	certData, err := requestCertificate(&fakeClient{}, []byte{}, fakeNodeName)
 	if err == nil {
 		t.Errorf("Got no error, wanted error an error because there was an empty private key passed in.")
 	}
@@ -109,7 +116,7 @@ func TestRequestNodeCertificateErrorCreatingCSR(t *testing.T) {
 		t.Fatalf("Unable to generate a new private key: %v", err)
 	}
 
-	certData, err := requestNodeCertificate(client, privateKeyData, "fake-node-name")
+	certData, err := requestCertificate(client, privateKeyData, fakeNodeName)
 	if err == nil {
 		t.Errorf("Got no error, wanted error an error because client.Create failed.")
 	}
@@ -124,7 +131,7 @@ func TestRequestNodeCertificate(t *testing.T) {
 		t.Fatalf("Unable to generate a new private key: %v", err)
 	}
 
-	certData, err := requestNodeCertificate(&fakeClient{}, privateKeyData, "fake-node-name")
+	certData, err := requestCertificate(&fakeClient{}, privateKeyData, fakeNodeName)
 	if err != nil {
 		t.Errorf("Got %v, wanted no error.", err)
 	}

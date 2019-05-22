@@ -20,6 +20,7 @@ package app
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -38,7 +39,7 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/klog"
 
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,15 +51,14 @@ import (
 	"k8s.io/apiserver/pkg/server/healthz"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
-	certificatesclient "k8s.io/client-go/kubernetes/typed/certificates/v1beta1"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdcertificate "k8s.io/client-go/tools/clientcmd/certificate"
 	"k8s.io/client-go/tools/record"
 	certutil "k8s.io/client-go/util/cert"
-	"k8s.io/client-go/util/certificate"
 	"k8s.io/client-go/util/keyutil"
-	cloudprovider "k8s.io/cloud-provider"
+	"k8s.io/cloud-provider"
 	cliflag "k8s.io/component-base/cli/flag"
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	"k8s.io/kubernetes/cmd/kubelet/app/options"
@@ -72,8 +72,6 @@ import (
 	kubeletscheme "k8s.io/kubernetes/pkg/kubelet/apis/config/scheme"
 	kubeletconfigvalidation "k8s.io/kubernetes/pkg/kubelet/apis/config/validation"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
-	kubeletcertificate "k8s.io/kubernetes/pkg/kubelet/certificate"
-	"k8s.io/kubernetes/pkg/kubelet/certificate/bootstrap"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	"k8s.io/kubernetes/pkg/kubelet/config"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
@@ -741,58 +739,40 @@ func run(s *options.KubeletServer, kubeDeps *kubelet.Dependencies, stopCh <-chan
 // bootstrapping is enabled or client certificate rotation is enabled.
 func buildKubeletClientConfig(s *options.KubeletServer, nodeName types.NodeName) (*restclient.Config, func(), error) {
 	if s.RotateCertificates && utilfeature.DefaultFeatureGate.Enabled(features.RotateKubeletClientCertificate) {
-		// Rules for client rotation and the handling of kube config files:
-		//
-		// 1. If the client provides only a kubeconfig file, we must use that as the initial client
-		//    kubeadm needs the initial data in the kubeconfig to be placed into the cert store
-		// 2. If the client provides only an initial bootstrap kubeconfig file, we must create a
-		//    kubeconfig file at the target location that points to the cert store, but until
-		//    the file is present the client config will have no certs
-		// 3. If the client provides both and the kubeconfig is valid, we must ignore the bootstrap
-		//    kubeconfig.
-		// 4. If the client provides both and the kubeconfig is expired or otherwise invalid, we must
-		//    replace the kubeconfig with a new file that points to the cert dir
-		//
-		// The desired configuration for bootstrapping is to use a bootstrap kubeconfig and to have
-		// the kubeconfig file be managed by this process. For backwards compatibility with kubeadm,
-		// which provides a high powered kubeconfig on the master with cert/key data, we must
-		// bootstrap the cert manager with the contents of the initial client config.
-
-		klog.Infof("Client rotation is on, will bootstrap in background")
-		certConfig, clientConfig, err := bootstrap.LoadClientConfig(s.KubeConfig, s.BootstrapKubeconfig, s.CertDirectory)
-		if err != nil {
-			return nil, nil, err
+		getter := &clientcmdcertificate.CertRotationGetter{
+			KubeConfig:          s.KubeConfig,
+			BootstrapKubeconfig: s.BootstrapKubeconfig,
+			CertDirectory:       s.CertDirectory,
+			Name: pkix.Name{
+				CommonName:   fmt.Sprintf("system:node:%s", nodeName),
+				Organization: []string{"system:nodes"},
+			},
+			PairNamePrefix: "kubelet-client",
+			Overrides:      &clientcmd.ConfigOverrides{},
+			MutateClientConfig: func(c *restclient.Config) error {
+				setContentTypeForClient(c, s.ContentType)
+				// Override kubeconfig qps/burst settings from flags
+				c.QPS = float32(s.KubeAPIQPS)
+				c.Burst = int(s.KubeAPIBurst)
+				return nil
+			},
+			MutateCertConfig: func(c *restclient.Config) error {
+				setContentTypeForClient(c, s.ContentType)
+				return nil
+			},
 		}
 
-		// use the correct content type for cert rotation, but don't set QPS
-		setContentTypeForClient(certConfig, s.ContentType)
-
-		kubeClientConfigOverrides(s, clientConfig)
-
-		clientCertificateManager, err := buildClientCertificateManager(certConfig, clientConfig, s.CertDirectory, nodeName)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		// the rotating transport will use the cert from the cert manager instead of these files
-		transportConfig := restclient.AnonymousClientConfig(clientConfig)
-
-		// we set exitAfter to five minutes because we use this client configuration to request new certs - if we are unable
-		// to request new certs, we will be unable to continue normal operation. Exiting the process allows a wrapper
-		// or the bootstrapping credentials to potentially lay down new initial config.
-		closeAllConns, err := kubeletcertificate.UpdateTransport(wait.NeverStop, transportConfig, clientCertificateManager, 5*time.Minute)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		klog.V(2).Info("Starting client certificate rotation.")
-		clientCertificateManager.Start()
-
-		return transportConfig, closeAllConns, nil
+		return getter.RestConfig()
 	}
 
 	if len(s.BootstrapKubeconfig) > 0 {
-		if err := bootstrap.LoadClientCert(s.KubeConfig, s.BootstrapKubeconfig, s.CertDirectory, nodeName); err != nil {
+		if err := clientcmdcertificate.LoadClientCert(s.KubeConfig, s.BootstrapKubeconfig,
+			"kubelet-client", s.CertDirectory,
+			&clientcmd.ConfigOverrides{},
+			&pkix.Name{
+				CommonName:   fmt.Sprintf("system:node:%s", nodeName),
+				Organization: []string{"system:nodes"},
+			}); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -808,42 +788,6 @@ func buildKubeletClientConfig(s *options.KubeletServer, nodeName types.NodeName)
 	kubeClientConfigOverrides(s, clientConfig)
 
 	return clientConfig, nil, nil
-}
-
-// buildClientCertificateManager creates a certificate manager that will use certConfig to request a client certificate
-// if no certificate is available, or the most recent clientConfig (which is assumed to point to the cert that the manager will
-// write out).
-func buildClientCertificateManager(certConfig, clientConfig *restclient.Config, certDir string, nodeName types.NodeName) (certificate.Manager, error) {
-	newClientFn := func(current *tls.Certificate) (certificatesclient.CertificateSigningRequestInterface, error) {
-		// If we have a valid certificate, use that to fetch CSRs. Otherwise use the bootstrap
-		// credentials. In the future it would be desirable to change the behavior of bootstrap
-		// to always fall back to the external bootstrap credentials when such credentials are
-		// provided by a fundamental trust system like cloud VM identity or an HSM module.
-		config := certConfig
-		if current != nil {
-			config = clientConfig
-		}
-		client, err := clientset.NewForConfig(config)
-		if err != nil {
-			return nil, err
-		}
-		return client.CertificatesV1beta1().CertificateSigningRequests(), nil
-	}
-
-	return kubeletcertificate.NewKubeletClientCertificateManager(
-		certDir,
-		nodeName,
-
-		// this preserves backwards compatibility with kubeadm which passes
-		// a high powered certificate to the kubelet as --kubeconfig and expects
-		// it to be rotated out immediately
-		clientConfig.CertData,
-		clientConfig.KeyData,
-
-		clientConfig.CertFile,
-		clientConfig.KeyFile,
-		newClientFn,
-	)
 }
 
 func kubeClientConfigOverrides(s *options.KubeletServer, clientConfig *restclient.Config) {
