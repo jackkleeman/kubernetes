@@ -46,8 +46,6 @@ type CertRotationGetter struct {
 
 	// Config overrides applied when loading either kubeconfig file
 	Overrides *clientcmd.ConfigOverrides
-	// Used to arbitrarily mutate the loaded config for client communication with the apiserver
-	MutateClientConfig func(*rest.Config) error
 	// Used to arbitrarily mutate the loaded config used for certificate rotation
 	MutateCertConfig func(*rest.Config) error
 }
@@ -77,11 +75,6 @@ func (g *CertRotationGetter) RestConfig() (*rest.Config, func(), error) {
 		return nil, nil, err
 	}
 
-	if g.MutateClientConfig != nil {
-		if err := g.MutateClientConfig(clientConfig); err != nil {
-			return nil, nil, err
-		}
-	}
 	if g.MutateCertConfig != nil {
 		if err := g.MutateCertConfig(clientConfig); err != nil {
 			return nil, nil, err

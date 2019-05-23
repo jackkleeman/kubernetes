@@ -749,20 +749,20 @@ func buildKubeletClientConfig(s *options.KubeletServer, nodeName types.NodeName)
 			},
 			PairNamePrefix: "kubelet-client",
 			Overrides:      &clientcmd.ConfigOverrides{},
-			MutateClientConfig: func(c *restclient.Config) error {
-				setContentTypeForClient(c, s.ContentType)
-				// Override kubeconfig qps/burst settings from flags
-				c.QPS = float32(s.KubeAPIQPS)
-				c.Burst = int(s.KubeAPIBurst)
-				return nil
-			},
 			MutateCertConfig: func(c *restclient.Config) error {
 				setContentTypeForClient(c, s.ContentType)
 				return nil
 			},
 		}
 
-		return getter.RestConfig()
+		clientConfig, closeAllConns, err := getter.RestConfig()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		kubeClientConfigOverrides(s, clientConfig)
+
+		return clientConfig, closeAllConns, nil
 	}
 
 	if len(s.BootstrapKubeconfig) > 0 {

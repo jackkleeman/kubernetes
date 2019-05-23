@@ -405,12 +405,6 @@ func (s KubeControllerManagerOptions) Config(allControllers []string, disabledBy
 				config.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
 				return nil
 			},
-			MutateClientConfig: func(config *restclient.Config) error {
-				config.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
-				config.QPS = s.Generic.ClientConnection.QPS
-				config.Burst = int(s.Generic.ClientConnection.Burst)
-				return nil
-			},
 		}
 		var err error
 		kubeconfig, _, err = getter.RestConfig()
@@ -424,10 +418,10 @@ func (s KubeControllerManagerOptions) Config(allControllers []string, disabledBy
 			return nil, err
 		}
 
-		kubeconfig.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
-		kubeconfig.QPS = s.Generic.ClientConnection.QPS
-		kubeconfig.Burst = int(s.Generic.ClientConnection.Burst)
 	}
+	kubeconfig.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
+	kubeconfig.QPS = s.Generic.ClientConnection.QPS
+	kubeconfig.Burst = int(s.Generic.ClientConnection.Burst)
 
 	client, err := clientset.NewForConfig(restclient.AddUserAgent(kubeconfig, KubeControllerManagerUserAgent))
 	if err != nil {
