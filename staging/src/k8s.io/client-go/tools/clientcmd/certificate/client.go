@@ -300,9 +300,8 @@ func waitForServer(cfg restclient.Config, deadline time.Duration) error {
 	return nil
 }
 
-// requestCertificate will create a certificate signing request for a node
-// (Organization and CommonName for the CSR will be set as expected for node
-// certificates) and send it to API server, then it will watch the object's
+// requestCertificate will create a certificate signing request for a given subject
+// and send it to API server, then it will watch the object's
 // status, once approved by API server, it will return the API server's issued
 // certificate (pem-encoded). If there is any errors, or the watch timeouts, it
 // will return an error.
@@ -336,7 +335,7 @@ func requestCertificate(client certificatesv1beta1.CertificateSigningRequestInte
 // This digest should include all the relevant pieces of the CSR we care about.
 // We can't direcly hash the serialized CSR because of random padding that we
 // regenerate every loop and we include usages which are not contained in the
-// CSR. This needs to be kept up to date as we add new fields to the node
+// CSR. This needs to be kept up to date as we add new fields to the
 // certificates and with ensureCompatible.
 func digestedName(privateKeyData []byte, subject *pkix.Name, usages []certificates.KeyUsage) string {
 	hash := sha512.New512_256()
@@ -362,5 +361,5 @@ func digestedName(privateKeyData []byte, subject *pkix.Name, usages []certificat
 		write([]byte(v))
 	}
 
-	return "node-csr-" + encode(hash.Sum(nil))
+	return "csr-" + encode(hash.Sum(nil))
 }

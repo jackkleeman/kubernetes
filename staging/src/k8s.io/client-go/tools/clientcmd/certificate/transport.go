@@ -145,13 +145,13 @@ func addCertRotation(stopCh <-chan struct{}, period time.Duration, clientConfig 
 		DialContext:         d.DialContext,
 	})
 
-	// Zero out all existing TLS options since our new transport enforces them.
+	// Zero out all existing TLS options except those related to CA since our new transport enforces them.
+	// CA options must remain, as otherwise we are not able to use this client in the controller manager
+	// as the controller manager derives a config based on this config, but doesn't use the Transport.
 	clientConfig.CertData = nil
 	clientConfig.KeyData = nil
 	clientConfig.CertFile = ""
 	clientConfig.KeyFile = ""
-	clientConfig.CAData = nil
-	clientConfig.CAFile = ""
 	clientConfig.Insecure = false
 
 	return nil

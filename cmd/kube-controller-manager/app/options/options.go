@@ -19,6 +19,7 @@ limitations under the License.
 package options
 
 import (
+	"crypto/x509/pkix"
 	"fmt"
 	"net"
 
@@ -29,8 +30,11 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	clientgokubescheme "k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/client-go/tools/clientcmd/certificate"
 	"k8s.io/client-go/tools/record"
 	cliflag "k8s.io/component-base/cli/flag"
 	kubectrlmgrconfigv1alpha1 "k8s.io/kube-controller-manager/config/v1alpha1"
@@ -87,6 +91,9 @@ type KubeControllerManagerOptions struct {
 
 	Master     string
 	Kubeconfig string
+
+	RotateCertificates bool
+	CertDirectory      string
 }
 
 // NewKubeControllerManagerOptions creates a new KubeControllerManagerOptions with a default config.
@@ -167,6 +174,7 @@ func NewKubeControllerManagerOptions() (*KubeControllerManagerOptions, error) {
 		}).WithLoopback(),
 		Authentication: apiserveroptions.NewDelegatingAuthenticationOptions(),
 		Authorization:  apiserveroptions.NewDelegatingAuthorizationOptions(),
+		CertDirectory:  "/var/lib/kube-controller-manager/pki",
 	}
 
 	s.Authentication.RemoteKubeConfigFileOptional = true
@@ -238,6 +246,9 @@ func (s *KubeControllerManagerOptions) Flags(allControllers []string, disabledBy
 	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to kubeconfig file with authorization and master location information.")
 	utilfeature.DefaultMutableFeatureGate.AddFlag(fss.FlagSet("generic"))
 
+	fs.BoolVar(&s.RotateCertificates, "rotate-certificates", s.RotateCertificates, "<Warning: Beta feature> Auto rotate the client certificates by requesting new certificates from the kube-apiserver when the certificate expiration approaches.")
+	fs.StringVar(&s.CertDirectory, "cert-dir", s.CertDirectory, "The directory where the TLS certs are located. "+
+		"If --tls-cert-file and --tls-private-key-file are provided, this flag will be ignored.")
 	return fss
 }
 
@@ -378,13 +389,45 @@ func (s KubeControllerManagerOptions) Config(allControllers []string, disabledBy
 		return nil, fmt.Errorf("error creating self-signed certificates: %v", err)
 	}
 
-	kubeconfig, err := clientcmd.BuildConfigFromFlags(s.Master, s.Kubeconfig)
-	if err != nil {
-		return nil, err
+	var kubeconfig *rest.Config
+
+	if s.RotateCertificates {
+		getter := certificate.CertRotationGetter{
+			KubeConfig:    s.Kubeconfig,
+			CertDirectory: s.CertDirectory,
+			Name: pkix.Name{
+				CommonName:   "system:kube-controller-manager",
+				Organization: []string{"system:kube-controller-manager"},
+			},
+			PairNamePrefix: "kube-controller-manager-client",
+			Overrides:      &clientcmd.ConfigOverrides{ClusterInfo: clientcmdapi.Cluster{Server: s.Master}},
+			MutateCertConfig: func(config *restclient.Config) error {
+				config.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
+				return nil
+			},
+			MutateClientConfig: func(config *restclient.Config) error {
+				config.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
+				config.QPS = s.Generic.ClientConnection.QPS
+				config.Burst = int(s.Generic.ClientConnection.Burst)
+				return nil
+			},
+		}
+		var err error
+		kubeconfig, _, err = getter.RestConfig()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		kubeconfig, err = clientcmd.BuildConfigFromFlags(s.Master, s.Kubeconfig)
+		if err != nil {
+			return nil, err
+		}
+
+		kubeconfig.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
+		kubeconfig.QPS = s.Generic.ClientConnection.QPS
+		kubeconfig.Burst = int(s.Generic.ClientConnection.Burst)
 	}
-	kubeconfig.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
-	kubeconfig.QPS = s.Generic.ClientConnection.QPS
-	kubeconfig.Burst = int(s.Generic.ClientConnection.Burst)
 
 	client, err := clientset.NewForConfig(restclient.AddUserAgent(kubeconfig, KubeControllerManagerUserAgent))
 	if err != nil {
